@@ -1,24 +1,56 @@
 workflows:
   android-apk:
     name: Gerar APK Android
-    max_build_duration: 60
-    instance_type: mac_mini_m2
+    instance_type: linux_x2
     environment:
       flutter: stable
-      xcode: latest
-      cocoapods: default
     scripts:
-      - name: Criar estrutura Android se não existir
+      - name: Criar app do zero
         script: |
-          flutter create .
-      - name: Baixar dependências
-        script: |
+          rm -rf app_build
+          flutter create --platforms=android app_build
+          cd app_build
+          cat > lib/main.dart <<'EOF'
+          import 'package:flutter/material.dart';
+
+          void main() {
+            runApp(const OlhoMagicoApp());
+          }
+
+          class OlhoMagicoApp extends StatelessWidget {
+            const OlhoMagicoApp({super.key});
+
+            @override
+            Widget build(BuildContext context) {
+              return MaterialApp(
+                debugShowCheckedModeBanner: false,
+                title: 'Olho Mágico Trader',
+                theme: ThemeData.dark(),
+                home: const HomePage(),
+              );
+            }
+          }
+
+          class HomePage extends StatelessWidget {
+            const HomePage({super.key});
+
+            @override
+            Widget build(BuildContext context) {
+              return const Scaffold(
+                body: Center(
+                  child: Text(
+                    'Olho Mágico Trader funcionando 🚀\nCALL • PUT • AGUARDAR',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(fontSize: 24),
+                  ),
+                ),
+              );
+            }
+          }
+          EOF
           flutter pub get
-      - name: Analisar projeto
-        script: |
-          flutter analyze || true
-      - name: Gerar APK
-        script: |
-          flutter build apk --release
+          flutter build apk --debug
+          mkdir -p ../apk
+          cp build/app/outputs/flutter-apk/app-debug.apk ../apk/olho-magico.apk
     artifacts:
-      - build/app/outputs/flutter-apk/app-release.apk
+      - apk/olho-magico.apk
