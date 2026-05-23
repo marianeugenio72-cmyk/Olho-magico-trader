@@ -1,0 +1,24 @@
+workflows:
+  android-apk:
+    name: Gerar APK Android
+    max_build_duration: 60
+    instance_type: mac_mini_m2
+    environment:
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+    scripts:
+      - name: Criar estrutura Android se não existir
+        script: |
+          flutter create .
+      - name: Baixar dependências
+        script: |
+          flutter pub get
+      - name: Analisar projeto
+        script: |
+          flutter analyze || true
+      - name: Gerar APK
+        script: |
+          flutter build apk --release
+    artifacts:
+      - build/app/outputs/flutter-apk/app-release.apk
