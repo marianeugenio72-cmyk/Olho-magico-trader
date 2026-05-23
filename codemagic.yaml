@@ -6,19 +6,43 @@ workflows:
       flutter: stable
 
     scripts:
-      - name: Criar app Flutter limpo
+      - name: Criar app Olho Mágico Trader
         script: |
           rm -rf app_build
-
           flutter create app_build
-
           cd app_build
 
-          cat > lib/main.dart << 'EOF'
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("android/app/src/main/AndroidManifest.xml")
+          s = p.read_text()
+          if "android.permission.INTERNET" not in s:
+              s = s.replace("<manifest", "<manifest")
+              s = s.replace("<application", '<uses-permission android:name="android.permission.INTERNET"/>\n    <application')
+          p.write_text(s)
+          PY
+
+          cat > lib/main.dart <<'EOF'
+          import 'dart:async';
+          import 'dart:convert';
+          import 'dart:io';
           import 'package:flutter/material.dart';
 
           void main() {
             runApp(const OlhoMagicoApp());
+          }
+
+          class Candle {
+            final double open, high, low, close;
+            final bool closed;
+
+            Candle(this.open, this.high, this.low, this.close, this.closed);
+
+            bool get green => close > open;
+            double get range => high - low;
+            double get body => (close - open).abs();
+            double get upperWick => high - (open > close ? open : close);
+            double get lowerWick => (open < close ? open : close) - low;
           }
 
           class OlhoMagicoApp extends StatelessWidget {
@@ -29,44 +53,283 @@ workflows:
               return MaterialApp(
                 debugShowCheckedModeBanner: false,
                 title: 'Olho Mágico Trader',
-                theme: ThemeData(
-                  colorScheme: ColorScheme.fromSeed(
-                    seedColor: Colors.deepPurple,
-                  ),
-                ),
+                theme: ThemeData.dark(),
                 home: const HomePage(),
               );
             }
           }
 
-          class HomePage extends StatelessWidget {
+          class HomePage extends StatefulWidget {
             const HomePage({super.key});
+
+            @override
+            State<HomePage> createState() => _HomePageState();
+          }
+
+          class _HomePageState extends State<HomePage> {
+            final ativo = TextEditingController(text: 'btcusdt');
+            final candles = <Candle>[];
+
+            WebSocket? socket;
+            String tempo = '1m';
+            String status = 'Desconectado';
+            String sinal = 'AGUARDAR';
+            String motivo = 'Clique em conectar';
+            int confianca = 0;
+
+            @override
+            void dispose() {
+              socket?.close();
+              ativo.dispose();
+              super.dispose();
+            }
+
+            Future<void> conectar() async {
+              await socket?.close();
+              candles.clear();
+
+              setState(() {
+                status = 'Conectando...';
+                sinal = 'AGUARDAR';
+                confianca = 0;
+                motivo = 'Coletando candles';
+              });
+
+              try {
+                final symbol = ativo.text.toLowerCase().replaceAll('/', '');
+                final url = 'wss://stream.binance.com:9443/ws/$symbol@kline_$tempo';
+                socket = await WebSocket.connect(url);
+
+                setState(() => status = 'Ao vivo na Binance');
+
+                socket!.listen((msg) {
+                  final data = jsonDecode(msg);
+                  final k = data['k'];
+
+                  final c = Candle(
+                    double.parse(k['o']),
+                    double.parse(k['h']),
+                    double.parse(k['l']),
+                    double.parse(k['c']),
+                    k['x'] == true,
+                  );
+
+                  if (candles.isEmpty || c.closed) {
+                    candles.add(c);
+                  } else {
+                    candles[candles.length - 1] = c;
+                  }
+
+                  if (candles.length > 80) {
+                    candles.removeAt(0);
+                  }
+
+                  analisar();
+                });
+              } catch (e) {
+                setState(() {
+                  status = 'Erro ao conectar';
+                  motivo = e.toString();
+                });
+              }
+            }
+
+            void analisar() {
+              if (candles.length < 12) {
+                setState(() {
+                  sinal = 'AGUARDAR';
+                  confianca = 0;
+                  motivo = 'Precisa de mais candles';
+                });
+                return;
+              }
+
+              final ultimos = candles.sublist(candles.length - 10);
+              final last = candles.last;
+
+              int call = 0;
+              int put = 0;
+              final razoes = <String>[];
+
+              final verdes = ultimos.where((c) => c.green).length;
+              final vermelhos = ultimos.length - verdes;
+
+              if (verdes >= 6) {
+                call += 25;
+                razoes.add('pressão compradora');
+              }
+
+              if (vermelhos >= 6) {
+                put += 25;
+                razoes.add('pressão vendedora');
+              }
+
+              if (last.range > 0 && last.body / last.range > 0.55) {
+                if (last.green) {
+                  call += 25;
+                  razoes.add('candle comprador forte');
+                } else {
+                  put += 25;
+                  razoes.add('candle vendedor forte');
+                }
+              }
+
+              if (last.range > 0 && last.lowerWick / last.range > 0.45) {
+                call += 20;
+                razoes.add('rejeição embaixo');
+              }
+
+              if (last.range > 0 && last.upperWick / last.range > 0.45) {
+                put += 20;
+                razoes.add('rejeição em cima');
+              }
+
+              final maxHigh = ultimos.map((c) => c.high).reduce((a, b) => a > b ? a : b);
+              final minLow = ultimos.map((c) => c.low).reduce((a, b) => a < b ? a : b);
+              final lateral = (maxHigh - minLow) < (last.close * 0.0015);
+
+              if (lateral) {
+                setState(() {
+                  sinal = 'AGUARDAR';
+                  confianca = 35;
+                  motivo = 'mercado lateral, melhor não entrar';
+                });
+                return;
+              }
+
+              final melhor = call > put ? call : put;
+
+              setState(() {
+                if (melhor < 55) {
+                  sinal = 'AGUARDAR';
+                  confianca = melhor;
+                  motivo = 'sem vantagem clara';
+                } else if (call > put) {
+                  sinal = 'CALL';
+                  confianca = melhor.clamp(0, 95);
+                  motivo = razoes.join(' + ');
+                } else {
+                  sinal = 'PUT';
+                  confianca = melhor.clamp(0, 95);
+                  motivo = razoes.join(' + ');
+                }
+              });
+            }
+
+            Color corSinal() {
+              if (sinal == 'CALL') return Colors.greenAccent;
+              if (sinal == 'PUT') return Colors.redAccent;
+              return Colors.amberAccent;
+            }
 
             @override
             Widget build(BuildContext context) {
               return Scaffold(
+                backgroundColor: const Color(0xff080b12),
                 appBar: AppBar(
+                  backgroundColor: const Color(0xff111827),
                   title: const Text('Olho Mágico Trader'),
                 ),
-                body: Center(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: const [
-                      Icon(
-                        Icons.visibility,
-                        size: 100,
-                        color: Colors.deepPurple,
-                      ),
-                      SizedBox(height: 20),
-                      Text(
-                        'APP FUNCIONANDO',
-                        style: TextStyle(
-                          fontSize: 28,
-                          fontWeight: FontWeight.bold,
+                body: ListView(
+                  padding: const EdgeInsets.all(16),
+                  children: [
+                    Card(
+                      color: const Color(0xff111827),
+                      child: Padding(
+                        padding: const EdgeInsets.all(16),
+                        child: Column(
+                          children: [
+                            TextField(
+                              controller: ativo,
+                              decoration: const InputDecoration(
+                                labelText: 'Ativo Binance',
+                                hintText: 'btcusdt, ethusdt, solusdt',
+                              ),
+                            ),
+                            const SizedBox(height: 12),
+                            DropdownButtonFormField<String>(
+                              value: tempo,
+                              items: const [
+                                DropdownMenuItem(value: '1m', child: Text('M1')),
+                                DropdownMenuItem(value: '5m', child: Text('M5')),
+                              ],
+                              onChanged: (v) => setState(() => tempo = v ?? '1m'),
+                              decoration: const InputDecoration(labelText: 'Tempo gráfico'),
+                            ),
+                            const SizedBox(height: 16),
+                            SizedBox(
+                              width: double.infinity,
+                              child: ElevatedButton.icon(
+                                onPressed: conectar,
+                                icon: const Icon(Icons.remove_red_eye),
+                                label: const Text('Conectar olho mágico'),
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            Text(status),
+                          ],
                         ),
                       ),
-                    ],
-                  ),
+                    ),
+                    const SizedBox(height: 18),
+                    Card(
+                      color: const Color(0xff111827),
+                      child: Padding(
+                        padding: const EdgeInsets.all(24),
+                        child: Column(
+                          children: [
+                            Icon(Icons.visibility, size: 80, color: corSinal()),
+                            const SizedBox(height: 16),
+                            Text(
+                              sinal,
+                              style: TextStyle(
+                                fontSize: 48,
+                                fontWeight: FontWeight.bold,
+                                color: corSinal(),
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            Text(
+                              'Confiança: $confianca%',
+                              style: const TextStyle(fontSize: 22),
+                            ),
+                            const SizedBox(height: 12),
+                            Text(
+                              motivo,
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(fontSize: 16),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 18),
+                    Card(
+                      color: const Color(0xff111827),
+                      child: Padding(
+                        padding: const EdgeInsets.all(16),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text(
+                              'Últimos candles',
+                              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                            ),
+                            const SizedBox(height: 10),
+                            Text('Candles recebidos: ${candles.length}'),
+                            if (candles.isNotEmpty)
+                              Text('Último preço: ${candles.last.close.toStringAsFixed(4)}'),
+                          ],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 20),
+                    const Text(
+                      'Use primeiro em conta demo. O app não garante lucro nem 99% de acerto.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: Colors.white70),
+                    ),
+                  ],
                 ),
               );
             }
@@ -74,7 +337,6 @@ workflows:
           EOF
 
           flutter pub get
-
           flutter build apk --release
 
     artifacts:
